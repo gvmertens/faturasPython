@@ -13,6 +13,14 @@ class Invoice:
     total_amount: Decimal | None
 
 
+TOTAL_LABELS = {
+    "TOTAL A PAGAR",
+    "VALOR DA FATURA",
+    "TOTAL DEVIDO",
+}
+BRL_AMOUNT_PATTERN = r"(?:[0-9]+|[0-9]{1,3}(?:\.[0-9]{3})+),[0-9]{2}"
+
+
 def has_invalid_dates(invoice: Invoice) -> bool:
     return invoice.due_date < invoice.issue_date
 
@@ -21,8 +29,17 @@ def has_missing_amount(invoice: Invoice) -> bool:
     return invoice.total_amount is None
 
 
-TOTAL_LABELS = {"TOTAL A PAGAR", "VALOR DA FATURA"}
-BRL_AMOUNT_PATTERN = r"(?:[0-9]+|[0-9]{1,3}(?:\.[0-9]{3})+),[0-9]{2}"
+def classify_amount_error(
+    extracted: Decimal | None,
+    expected: Decimal,
+) -> str | None:
+    if extracted is None:
+        return 'amount_not_extracted'
+
+    if extracted != expected:
+        return 'amount_mismatch'
+
+    return None
 
 
 def parse_brl_amount(text: str) -> Decimal:

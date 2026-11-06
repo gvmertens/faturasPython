@@ -3,6 +3,7 @@ from datetime import date
 from decimal import Decimal
 from extraction import (
     Invoice,
+    classify_amount_error,
     has_invalid_dates,
     has_missing_amount,
     parse_brl_amount,
@@ -13,10 +14,14 @@ from extraction import (
     count_invoices_needing_review,
 )
 from evaluation import (
+    build_evaluation_report,
+    count_failures_by_reason,
     is_amount_correct,
     count_correct_amounts,
     calculate_accuracy,
     evaluate_amount_extraction,
+    select_evaluation_cases,
+    evaluate_reserved_cases,
 )
 
 
@@ -74,8 +79,6 @@ class CourseTests(unittest.TestCase):
         ]
         selected = select_evaluation_cases(cases)
         self.assertEqual(selected, [{"id": "B", "split": "evaluation"}])
-        evaluation_cases = select_evaluation_cases(cases)
-        accuracy = evaluate_amount_extraction(evaluation_cases)
 
     def test_supplier(self):
         self.assertEqual(
@@ -186,7 +189,7 @@ class CourseTests(unittest.TestCase):
         result = evaluate_reserved_cases(cases)
 
         self.assertEqual(result, 50.0)
-        
+
     def test_should_return_none_when_no_reserved_cases_exist(self):
         cases = [
             {
@@ -197,6 +200,89 @@ class CourseTests(unittest.TestCase):
         ]
         result = evaluate_reserved_cases(cases)
         self.assertIsNone(result)
+
+    def test_should_report_reserved_cases_results(self):
+        cases = [
+            {
+                "id": "D-01",
+                "split": "development",
+                "text": "TOTAL A PAGAR: R$ 100,00",
+                "expected_amount": Decimal("100.00"),
+            },
+            {
+                "id": "E-01",
+                "split": "evaluation",
+                "text": "Saldo para quitação: R$ 50,00",
+                "expected_amount": Decimal("50.00"),
+            },
+            {
+                "id": "E-02",
+                "split": "evaluation",
+                "text": "TOTAL A PAGAR: R$ 80,00",
+                "expected_amount": Decimal("80.00"),
+            },
+        ]
+
+        result = build_evaluation_report(cases)
+
+        self.assertEqual(
+            result,
+            {
+                "evaluated_count": 2,
+                "correct_count": 1,
+                "accuracy": 50.0,
+                "failures": [
+                    {
+                        "id": "E-01",
+                        "reason": "amount_not_extracted",
+                        "expected_amount": Decimal("50.00"),
+                        "extracted_amount": None,
+                    },
+                ],
+                "failure_counts": {"amount_not_extracted": 1},
+            },
+        )
+
+    def test_should_return_amount_mismatch(self):
+        result = classify_amount_error(Decimal("60.00"), Decimal("70.00"))
+        self.assertEqual(result, "amount_mismatch")
+
+    def test_should_classify_missing_amount(self):
+        result = classify_amount_error(None, Decimal("70.00"))
+        self.assertEqual(result, "amount_not_extracted")
+
+    def test_should_return_no_error_when_amount_matches(self):
+        result = classify_amount_error(Decimal("60.00"), Decimal("60.00"))
+        self.assertIsNone(result)
+
+    def test_should_return_empty_counts_when_no_failures_exist(self):
+        result = count_failures_by_reason([])
+        self.assertEqual(result, {})
+
+    def test_should_count_failures_by_reason(self):
+        failures = [
+            {
+                "id": "E-01",
+                "reason": "amount_not_extracted",
+                "expected_amount": Decimal("50.00"),
+                "extracted_amount": None,
+            },
+            {
+                "id": "E-03",
+                "reason": "amount_not_extracted",
+                "expected_amount": Decimal("70.00"),
+                "extracted_amount": None,
+            },
+            {
+                "id": "E-02",
+                "reason": "amount_mismatch",
+                "expected_amount": Decimal("80.00"),
+                "extracted_amount": Decimal("60.00"),
+            },
+        ]
+        result = count_failures_by_reason(failures)
+        self.assertEqual(result, {"amount_not_extracted": 2, "amount_mismatch": 1})
+
 
 if __name__ == "__main__":
     unittest.main()
