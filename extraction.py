@@ -74,11 +74,3 @@ def count_invoices_needing_review(results: list[dict]) -> int:
         if needs_review(fields):
             count += 1
     return count
-
-
-def select_evaluation_cases(cases: list[dict]) -> list[dict]:
-    selected = []
-    for case in cases:
-        if case["split"] == "evaluation":
-            selected.append(case)
-    return selected

@@ -164,6 +164,39 @@ class CourseTests(unittest.TestCase):
         self.assertEqual(evaluate_amount_extraction(cases), 100.0)
         self.assertIsNone(evaluate_amount_extraction([]))
 
+    def test_should_evaluate_only_reserved_cases(self):
+        cases = [
+            {
+                "split": "development",
+                "text": "TOTAL A PAGAR: R$ 100,00",
+                "expected_amount": Decimal("100.00"),
+            },
+            {
+                "split": "evaluation",
+                "text": "Saldo para quitação: R$ 50,00",
+                "expected_amount": Decimal("50.00"),
+            },
+            {
+                "split": "evaluation",
+                "text": "TOTAL A PAGAR: R$ 80,00",
+                "expected_amount": Decimal("80.00"),
+            },
+        ]
+
+        result = evaluate_reserved_cases(cases)
+
+        self.assertEqual(result, 50.0)
+        
+    def test_should_return_none_when_no_reserved_cases_exist(self):
+        cases = [
+            {
+                "split": "development",
+                "text": "TOTAL A PAGAR: R$ 100,00",
+                "expected_amount": Decimal("100.00"),
+            },
+        ]
+        result = evaluate_reserved_cases(cases)
+        self.assertIsNone(result)
 
 if __name__ == "__main__":
     unittest.main()

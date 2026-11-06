@@ -23,3 +23,14 @@ def evaluate_amount_extraction(cases: list[dict]) -> float | None:
         if is_amount_correct(total, case['expected_amount']):
             correct_count += 1
     return calculate_accuracy(correct_count, len(cases))
+
+def select_evaluation_cases(cases: list[dict]) -> list[dict]:
+    selected = []
+    for case in cases:
+        if case["split"] == "evaluation":
+            selected.append(case)
+    return selected
+
+def evaluate_reserved_cases(cases: list[dict]) -> float | None:
+    evaluation_cases = select_evaluation_cases(cases)
+    return evaluate_amount_extraction(evaluation_cases)
