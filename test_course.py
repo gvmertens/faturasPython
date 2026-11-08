@@ -1,9 +1,14 @@
 import unittest
+from unittest.mock import Mock
 from datetime import date
 from decimal import Decimal
+from run_hybrid import evaluate_hybrid_batch
 from extraction import (
     Invoice,
     classify_amount_error,
+    collect_total_candidates,
+    extract_total_with_fallback,
+    get_invoice_review_reason,
     has_invalid_dates,
     has_missing_amount,
     parse_brl_amount,
@@ -12,6 +17,9 @@ from extraction import (
     extract_invoice_batch,
     needs_review,
     count_invoices_needing_review,
+    parse_llm_total,
+    should_use_llm_for_total,
+    validate_invoice_total,
 )
 from evaluation import (
     build_evaluation_report,
@@ -283,6 +291,209 @@ class CourseTests(unittest.TestCase):
         result = count_failures_by_reason(failures)
         self.assertEqual(result, {"amount_not_extracted": 2, "amount_mismatch": 1})
 
+    def test_should_return_total_inconsistent_when_total_is_inconsistent(self):
+        result = validate_invoice_total(
+            Decimal("100.00"), Decimal("20.00"), Decimal("70.00")
+        )
+        self.assertEqual(result, "total_inconsistent")
+
+    def test_should_return_none_when_total_is_consistent(self):
+        result = validate_invoice_total(
+            Decimal("100.00"), Decimal("20.00"), Decimal("80.00")
+        )
+        self.assertIsNone(result)
+
+    def test_should_accept_zero_discount(self):
+        result = validate_invoice_total(
+            Decimal("100.00"), Decimal("0.00"), Decimal("100.00")
+        )
+        self.assertIsNone(result)
+
+    def test_invoice_review_reason_should_total_inconsistent_when_total_is_inconsistent(
+        self,
+    ):
+        fields = {
+            "supplier": "Teste 1",
+            "total_amount": 70.00,
+            "services": 100.00,
+            "discount": 20.00,
+            "total_rule": "services_minus_discount",
+        }
+        result = get_invoice_review_reason(fields)
+        self.assertEqual(result, "total_inconsistent")
+
+    def test_invoice_review_reason_should_none_when_no_rules_apply(self):
+        fields = {
+            "supplier": "Teste 1",
+            "total_amount": 70.00,
+            "services": 100.00,
+            "discount": 20.00,
+        }
+        result = get_invoice_review_reason(fields)
+        self.assertIsNone(result)
+
+    def test_count_invoices_needing_review_counts_correctly(self):
+        invoices = [
+            {
+                "supplier": "Teste 1",
+                "total_amount": Decimal("70.00"),
+                "services": Decimal("100.00"),
+                "discount": Decimal("20.00"),
+            },
+            {
+                "supplier": "Teste 1",
+                "total_amount": Decimal("70.00"),
+                "services": Decimal("100.00"),
+                "discount": Decimal("20.00"),
+                "total_rule": "services_minus_discount",
+            },
+        ]
+        result = count_invoices_needing_review(invoices)
+        self.assertEqual(result, 1)
+
+    def test_should_prioritize_missing_required_field_over_inconsistent_total(self):
+        fields = {
+            "supplier": None,
+            "total_amount": Decimal("70.00"),
+            "services": Decimal("100.00"),
+            "discount": Decimal("20.00"),
+            "total_rule": "services_minus_discount",
+        }
+        self.assertEqual(get_invoice_review_reason(fields), "missing_required_field")
+
+    def test_should_return_none_when_total_amount_is_none(self):
+        response = '{"total_amount": null}'
+        result = parse_llm_total(response)
+        self.assertIsNone(result)
+
+    def test_should_return_decimal_when_total_amount_is_present(self):
+        response = '{"total_amount": "125.00"}'
+        result = parse_llm_total(response)
+        self.assertEqual(result, Decimal("125.00"))
+
+    def test_should_reject_numeric_llm_total(self):
+        with self.assertRaises(ValueError):
+            parse_llm_total('{"total_amount": 125.00}')
+
+    def test_should_reject_invalid_monetary_format(self):
+        with self.assertRaises(ValueError):
+            parse_llm_total('{"total_amount": "NaN"}')
+
+    def test_should_reject_json_array(self):
+        with self.assertRaises(ValueError):
+            parse_llm_total('[]')
+
+    def test_should_reject_json_object_without_total_amount(self):
+            with self.assertRaises(ValueError):
+                parse_llm_total('{}')
+
+    def extract_response_and_print_total_value(response: str, expected: Decimal) -> dict:
+        total = parse_llm_total(response)
+        reason = classify_amount_error(total, expected)
+
+        print(f"Extracted total value: {total}")
+        print(f"Evaluation reason: {reason}")
+
+        return {"total_amount": total, "reason": reason}
+
+    def test_should_classify_correct_llm_total(self):
+        expected = Decimal("125.00")
+        total = parse_llm_total('{"total_amount":"125.00"}')
+
+        self.assertEqual(total, expected)
+        self.assertIsNone(classify_amount_error(total, expected))
+
+
+    def test_should_classify_null_llm_total_as_not_extracted(self):
+        expected = Decimal("125.00")
+        total = parse_llm_total('{"total_amount":null}')
+
+        self.assertIsNone(total)
+        self.assertEqual(
+            classify_amount_error(total, expected),
+            "amount_not_extracted",
+        )
+
+    def test_should_deduplicate_equal_total_candidates(self):
+        text = "Valor da fatura: R$ 125,00\nTotal a pagar: R$ 125,00"
+        total = collect_total_candidates(text)
+        self.assertEqual(total, {Decimal("125.00")})
+
+    def test_should_keep_distinct_total_candidates(self):
+            text = "Valor da fatura: R$ 125,00\nTotal a pagar: R$ 150,00"
+            total = collect_total_candidates(text)
+            self.assertEqual(total, {Decimal("125.00"), Decimal("150.00")})
+
+    def test_should_use_llm_for_total_when_multiple_candidates_exist(self):
+        text = "Valor da fatura: R$ 125,00\nTotal a pagar: R$ 150,00"
+        self.assertTrue(should_use_llm_for_total(text))
+
+    def test_should_not_use_llm_for_total_when_single_candidate_exists(self):
+        text = "Valor da fatura: R$ 125,00\nTotal a pagar: R$ 125,00"
+        self.assertFalse(should_use_llm_for_total(text))
+
+    def test_should_use_llm_for_total_when_no_candidates_exist(self):
+        text = "Pagar: R$ 125,00\nDesconto: R$ 25,00"
+        self.assertTrue(should_use_llm_for_total(text))
+
+    def test_should_use_zero_total_without_calling_llm(self):
+        text = "Total a pagar: R$ 0,00"
+        llm = Mock(return_value='{"total_amount":"125.00"}')
+
+        result = extract_total_with_fallback(text, llm)
+
+        self.assertEqual(result, Decimal("0.00"))
+        llm.assert_not_called()
+
+
+    def test_should_call_llm_once_when_total_is_ambiguous(self):
+        text = "Valor da fatura: R$ 150,00\nTotal a pagar: R$ 125,00"
+        llm = Mock(return_value='{"total_amount":"125.00"}')
+
+        result = extract_total_with_fallback(text, llm)
+
+        self.assertEqual(result, Decimal("125.00"))
+        llm.assert_called_once_with(text)
+
+    def test_should_call_llm_once_when_no_total_candidate_exists(self):
+        text = "Montante a liquidar: R$ 187,35"
+        llm = Mock(return_value='{"total_amount":"187.35"}')
+
+        result = extract_total_with_fallback(text, llm)
+
+        self.assertEqual(result, Decimal("187.35"))
+        llm.assert_called_once_with(text)
+
+    def test_should_propagate_llm_timeout_to_batch_caller(self):
+        text = "Valor da fatura: R$ 150,00\nTotal a pagar: R$ 125,00"
+        llm = Mock(side_effect=TimeoutError("LLM call timed out"))
+
+        with self.assertRaises(TimeoutError):
+            extract_total_with_fallback(text, llm)
+
+        llm.assert_called_once_with(text)
+
+    def test_should_continue_batch_after_llm_timeout(self):
+        b05 = {
+            "id": "B-05",
+            "text": "Valor da fatura: R$ 150,00\nTotal a pagar: R$ 125,00",
+            "expected_amount": Decimal("125.00"),
+        }
+        b01 = {
+            "id": "B-01",
+            "text": "Total a pagar: R$ 2.350,45",
+            "expected_amount": Decimal("2350.45"),
+        }
+        llm = Mock(side_effect=TimeoutError("LLM call timed out"))
+
+        report = evaluate_hybrid_batch([b05, b01], llm)
+
+        self.assertEqual(report["correct_count"], 1)
+        self.assertEqual(
+            report["reviews"],
+            [{"id": "B-05", "reason": "llm_timeout"}],
+        )
+        llm.assert_called_once_with(b05["text"])
 
 if __name__ == "__main__":
     unittest.main()
