@@ -20,6 +20,7 @@ from extraction import (
     parse_llm_total,
     should_use_llm_for_total,
     validate_invoice_total,
+    validate_total_evidence,
 )
 from evaluation import (
     build_evaluation_report,
@@ -494,6 +495,55 @@ class CourseTests(unittest.TestCase):
             [{"id": "B-05", "reason": "llm_timeout"}],
         )
         llm.assert_called_once_with(b05["text"])
+
+    def test_should_call_llm_when_generic_total_has_financial_adjustment(self):
+        text = (
+            "Valor da fatura: R$ 300,00\n"
+            "Crédito aplicado: R$ 40,00\n"
+            "Saldo final para pagamento: R$ 260,00"
+        )
+        llm = Mock(return_value='{"total_amount":"260.00"}')
+
+        result = extract_total_with_fallback(text, llm)
+
+        self.assertEqual(result, Decimal("260.00"))
+        llm.assert_called_once_with(text)
+
+
+    def test_should_keep_generic_zero_total_without_financial_adjustment(self):
+        text = "Valor da fatura: R$ 0,00"
+        llm = Mock(return_value='{"total_amount":"125.00"}')
+
+        result = extract_total_with_fallback(text, llm)
+
+        self.assertEqual(result, Decimal("0.00"))
+        llm.assert_not_called()
+
+    def test_should_validate_total_evidence_against_document(self):
+        line = "Saldo líquido a pagar: R$ 279,50"
+        text = f"Valor da fatura: R$ 320,00\n{line}"
+
+        self.assertIsNone(
+            validate_total_evidence(text, Decimal("279.50"), line)
+        )
+        self.assertEqual(
+            validate_total_evidence(
+                text, Decimal("279.50"), "Total devido: R$ 279,50"
+            ),
+            "invalid_total_evidence",
+        )
+        self.assertEqual(
+            validate_total_evidence(text, Decimal("270.00"), line),
+            "total_evidence_mismatch",
+        )
+
+    def test_should_ignore_edge_spaces_in_total_evidence(self):
+        text = "        Saldo líquido a pagar: R$ 230,00 "
+        evidence = "Saldo líquido a pagar: R$ 230,00  "
+
+        result = validate_total_evidence(text, Decimal("230.00"), evidence)
+
+        self.assertIsNone(result)
 
 if __name__ == "__main__":
     unittest.main()

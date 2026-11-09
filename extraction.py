@@ -1,3 +1,4 @@
+from email.mime import text
 import re
 from dataclasses import dataclass
 from datetime import date
@@ -15,11 +16,17 @@ class Invoice:
     total_amount: Decimal | None
 
 
-TOTAL_LABELS = {
-    "TOTAL A PAGAR",
-    "VALOR DA FATURA",
-    "TOTAL DEVIDO",
-}
+TOTAL_FINAL_LABELS = {"TOTAL A PAGAR", "TOTAL DEVIDO"}
+TOTAL_GENERIC_LABELS = {"VALOR DA FATURA"}
+TOTAL_LABELS = TOTAL_FINAL_LABELS | TOTAL_GENERIC_LABELS
+ADJUSTMENT_LABELS = {"CRÉDITO APLICADO"}
+INVOICE_AMOUNT_FIELDS = (
+    "invoice_amount",
+    "discount_amount",
+    "credit_amount",
+    "total_amount",
+)
+
 BRL_AMOUNT_PATTERN = r"(?:[0-9]+|[0-9]{1,3}(?:\.[0-9]{3})+),[0-9]{2}"
 
 
@@ -69,16 +76,46 @@ def extract_total_amount(text: str) -> Decimal | None:
     return None
 
 
-def collect_total_candidates(text: str) -> set[Decimal]:
+def collect_total_candidates(
+    text: str,
+    labels: set[str] = TOTAL_LABELS,
+) -> set[Decimal]:
     candidates = set()
+
     for line in text.splitlines():
         label, separator, amount_text = line.partition(":")
-        if separator and label.strip().upper() in TOTAL_LABELS:
-            try:
-                candidates.add(parse_brl_amount(amount_text))
-            except (ValueError, InvalidOperation):
-                continue
+        if not separator or label.strip().upper() not in labels:
+            continue
+
+        try:
+            candidates.add(parse_brl_amount(amount_text))
+        except (ValueError, InvalidOperation):
+            continue
+
     return candidates
+
+
+def has_financial_adjustment(text: str) -> bool:
+    for line in text.splitlines():
+        label, separator, _ = line.partition(":")
+        if separator and label.strip().upper() in ADJUSTMENT_LABELS:
+            return True
+
+    return False
+
+
+def select_local_total(text: str) -> Decimal | None:
+    candidates = collect_total_candidates(text)
+
+    if len(candidates) != 1:
+        return None
+
+    if has_financial_adjustment(text):
+        final_candidates = collect_total_candidates(text, TOTAL_FINAL_LABELS)
+        if not final_candidates:
+            return None
+
+    return next(iter(candidates))
 
 
 def extract_invoice_fields(text: str) -> dict:
@@ -156,17 +193,70 @@ def parse_llm_total(response: str) -> Decimal | None:
 
 
 def should_use_llm_for_total(text: str) -> bool:
-    return len(collect_total_candidates(text)) != 1
+    return select_local_total(text) is None
 
 
 def extract_total_with_fallback(
     text: str,
     call_llm: Callable[[str], str],
 ) -> Decimal | None:
-    candidates = collect_total_candidates(text)
+    local_total = select_local_total(text)
 
-    if len(candidates) == 1:
-        return next(iter(candidates))
+    if local_total is not None:
+        return local_total
 
-    response = call_llm(text)
-    return parse_llm_total(response)
+    return parse_llm_total(call_llm(text))
+
+
+def parse_llm_invoice_amounts(response: str) -> dict[str, Decimal | None]:
+    payload = json.loads(response)
+    if not isinstance(payload, dict):
+        raise ValueError("Expected a JSON object")
+
+    amounts = {}
+    for field in INVOICE_AMOUNT_FIELDS:
+        if field not in payload:
+            raise ValueError(f"Missing field: {field}")
+
+        try:
+            amounts[field] = parse_llm_total(
+                json.dumps({"total_amount": payload[field]})
+            )
+        except ValueError as exc:
+            raise ValueError(f"Invalid value for {field}") from exc
+
+    return amounts
+
+
+def validate_total_evidence(
+    text: str,
+    total: Decimal | None,
+    evidence: object,
+) -> str | None:
+    if total is None:
+        return None if evidence is None else "unexpected_total_evidence"
+
+    if not isinstance(evidence, str):
+        return "invalid_total_evidence"
+
+    evidence = evidence.strip()
+    document_lines = {line.strip() for line in text.splitlines()}
+
+    if not evidence or evidence not in document_lines:
+        return "invalid_total_evidence"
+
+    label, separator, amount_text = evidence.partition(":")
+    evidence_labels = TOTAL_FINAL_LABELS | {"SALDO LÍQUIDO A PAGAR"}
+
+    if not separator or label.strip().upper() not in evidence_labels:
+        return "invalid_total_evidence"
+
+    try:
+        cited_amount = parse_brl_amount(amount_text)
+    except (ValueError, InvalidOperation):
+        return "invalid_total_evidence"
+
+    if cited_amount != total:
+        return "total_evidence_mismatch"
+
+    return None
